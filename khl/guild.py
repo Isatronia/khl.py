@@ -1,12 +1,15 @@
+"""guild related stuffs: Guild, ChannelCategory"""
 import logging
 from typing import List, Union, Dict, IO
 
 from . import api
 from .channel import Channel, public_channel_factory, PublicChannel
-from .gateway import Requestable
-from .interface import LazyLoadable, ChannelTypes, GuildMuteTypes
+from .gateway import Requestable, Gateway
+from .interface import LazyLoadable
 from .role import Role
+from .types import ChannelTypes, GuildMuteTypes
 from .user import User
+from .util import unpack_id
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +19,7 @@ class GuildUser(User):
     joined_at: int
     active_time: int
     roles: List[int]
+    gate: Gateway
 
     def __init__(self, **kwargs):
         self.roles = kwargs.get('roles', [])
@@ -139,11 +143,11 @@ class Guild(LazyLoadable, Requestable):
     async def fetch_channel_category_list(self, force_update: bool = True) -> List[ChannelCategory]:
         """fetch all channel category as a list"""
         await self.fetch_channel_list(force_update)
-        return [v for v in self._channel_categories.values()]
+        return list(self._channel_categories.values())
 
     async def fetch_channel_list(self, force_update: bool = True) -> List[PublicChannel]:
         if force_update or self._channels is None:
-            raw_list = await self.gate.exec_pagination_req(api.Channel.list(guild_id=self.id))
+            raw_list = await self.gate.exec_paged_req(api.Channel.list(guild_id=self.id))
             channels: List[PublicChannel] = []
             channel_categories: Dict[str, ChannelCategory] = {}
             for i in raw_list:
@@ -165,7 +169,7 @@ class Guild(LazyLoadable, Requestable):
     def _merge_channels(self) -> List[PublicChannel]:
         channels = []
         channels.extend(self._channels)
-        for k, v in self._channel_categories.items():
+        for v in self._channel_categories.values():
             channels.extend(v)
         return channels
 
@@ -184,12 +188,13 @@ class Guild(LazyLoadable, Requestable):
             return self._merge_channels()
         raise ValueError('not loaded, please call `await fetch_channel_list()` first')
 
-    async def list_user(self, channel: Channel) -> List[User]:
-        users = await self.gate.exec_pagination_req(api.Guild.userList(guild_id=self.id, channel_id=channel.id))
+    async def list_user(self, channel: Channel, **kwargs) -> List[User]:
+        users = await self.gate.exec_paged_req(api.Guild.userList(guild_id=self.id, channel_id=channel.id), **kwargs)
         return [User(_gate_=self.gate, _lazy_loaded_=True, **i) for i in users]
 
     async def fetch_joined_channel(self, user: User, page: int = 1, page_size: int = 50) -> List[PublicChannel]:
-        channels = await self.gate.exec_pagination_req(api.ChannelUser.getJoinedChannel(page=page, page_size=page_size, guild_id=self.id, user_id=user.id))
+        channels = await self.gate.exec_pagination_req(
+            api.ChannelUser.getJoinedChannel(page=page, page_size=page_size, guild_id=self.id, user_id=user.id))
         return [public_channel_factory(self.gate, **i) for i in channels]
 
     async def fetch_user(self, user_id: str) -> GuildUser:
@@ -203,7 +208,7 @@ class Guild(LazyLoadable, Requestable):
 
     async def fetch_roles(self, force_update: bool = True) -> List[Role]:
         if force_update or self._roles is None:
-            raw_list = await self.gate.exec_pagination_req(api.GuildRole.list(guild_id=self.id))
+            raw_list = await self.gate.exec_paged_req(api.GuildRole.list(guild_id=self.id))
             self._roles = [Role(**i) for i in raw_list]
         return self._roles
 
@@ -254,8 +259,7 @@ class Guild(LazyLoadable, Requestable):
         return await self.gate.exec_req(api.Channel.delete(channel.id))
 
     async def kickout(self, user: Union[User, str]):
-        target_id = user.id if isinstance(user, User) else user
-        return await self.gate.exec_req(api.Guild.kickout(guild_id=self.id, target_id=target_id))
+        return await self.gate.exec_req(api.Guild.kickout(guild_id=self.id, target_id=unpack_id(user)))
 
     async def leave(self):
         """leave from this guild"""
@@ -277,16 +281,18 @@ class Guild(LazyLoadable, Requestable):
 
     async def fetch_emoji_list(self) -> List[Dict]:
         """fetch guild emoji list
-        :returns a list of emoji dict, dict contains {'name', 'id', 'user_info': who uploaded the emoji}
-        """
-        return await self.gate.exec_pagination_req(api.GuildEmoji.list(guild_id=self.id))
 
-    async def create_emoji(self, emoji: Union[IO, str], *, name: str = None):
+        :returns: a list of emoji dict, dict contains {'name', 'id', 'user_info': who uploaded the emoji}
+        """
+        return await self.gate.exec_paged_req(api.GuildEmoji.list(guild_id=self.id))
+
+    async def create_emoji(self, emoji: Union[IO, str], *, name: str = None) -> Dict:
         """upload a custom emoji to the guild
 
-        :returns a emoji dict, refer to fetch_emoji_list() doc
+        :returns: an emoji dict. For emoji dict structure, please refer to fetch_emoji_list() doc
         """
-        emoji = open(emoji, 'rb') if isinstance(emoji, str) else emoji
+        if isinstance(emoji, str):
+            emoji = open(emoji, 'rb')
         params = {'guild_id': self.id, 'emoji': emoji}
         if name is not None:
             params['name'] = name
@@ -300,4 +306,5 @@ class Guild(LazyLoadable, Requestable):
         return await self.gate.exec_req(api.GuildEmoji.update(**params))
 
     async def delete_emoji(self, id: str):
+        """delete a custom emoji"""
         return await self.gate.exec_req(api.GuildEmoji.delete(id))
